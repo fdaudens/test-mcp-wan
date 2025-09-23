@@ -439,13 +439,24 @@ app = mcp.streamable_http_app()
 
 # Add a simple health check endpoint for Render
 try:
+    import asyncio
     from fastapi import FastAPI
+    from starlette.responses import StreamingResponse
 
     _outer_app = FastAPI()
 
     @_outer_app.get("/healthz")
     async def _healthz() -> dict[str, bool]:
         return {"ok": True}
+
+    async def _event_generator():
+        while True:
+            yield "event: ping\ndata: ok\n\n"
+            await asyncio.sleep(1)
+
+    @_outer_app.get("/test-sse")
+    async def _test_sse() -> StreamingResponse:
+        return StreamingResponse(_event_generator(), media_type="text/event-stream")
 
     _outer_app.mount("/", app)
     app = _outer_app
