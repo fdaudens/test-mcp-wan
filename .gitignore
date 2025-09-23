@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+.build/
+.dist/
+
+# OS
+.DS_Store
+
+# Tooling
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Uvicorn reload artifacts
+*.pid

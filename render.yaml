@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: python-authenticated-mcp
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server.app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: VECTOR_STORE_ID
+        sync: false
+      - key: AUTH0_ISSUER
+        value: https://YOUR_TENANT.us.auth0.com/
+      - key: RESOURCE_SERVER_URL
+        value: https://your-service.onrender.com/
+      - key: GOOGLE_FACT_CHECK_API_KEY
+        sync: false
+      - key: GUARDIAN_API_KEY
+        sync: false
+    healthCheckPath: /healthz
