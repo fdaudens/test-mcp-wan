@@ -54,8 +54,8 @@ mcp = FastMCP(
     ),
 )
 
-# Mount Streamable HTTP at the root (i.e., the MCP endpoint is "/")
-mcp.settings.streamable_http_path = "/"
+# Mount Streamable HTTP at a dedicated path to avoid conflicts with root
+mcp.settings.streamable_http_path = "/sse"
 
 # ---- Tools ----
 def _openai_client() -> OpenAI:
