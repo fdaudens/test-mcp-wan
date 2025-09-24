@@ -4,7 +4,7 @@ This directory contains a production‑ready scaffold for building an authentica
 
 It mirrors the TypeScript version in `authenticated-mcp-server-scaffold`, but uses the official Python MCP SDK.
 
-- Implements the required MCP tools: **`search`** and **`fetch`**; plus **`fact_check_search`** using Google's Fact Check Tools API, **`rss_fetch`** for RSS feeds, and **`youtube_transcript`** to retrieve YouTube transcripts.
+- Implements the required MCP tools: **`search`** and **`fetch`**; plus **`fact_check_search`** using Google's Fact Check Tools API, **`rss_fetch`** for RSS feeds, and **`youtube_transcript`** for YouTube captions.
 - Secures access using **OAuth 2.1** with an **Auth0** authorization server.
 - Runs locally with FastAPI and the Python MCP SDK’s HTTP streaming transport.
 
@@ -80,6 +80,8 @@ Optional keys (for additional tools):
 # Google Fact Check Tools API (for `fact_check_search`)
 GOOGLE_FACT_CHECK_API_KEY=your_google_api_key
 
+# YouTube API (optional; transcript tool does not require it)
+# YOUTUBE_API_KEY=your_youtube_api_key
 ```
 
 ---
@@ -112,10 +114,9 @@ npx @modelcontextprotocol/inspector@latest
 - Server URL: `http://localhost:8788`
 - Open Auth Settings: enter your Auth0 tenant issuer if prompted.
 - Connect → should turn green.
-- List Tools → should show `search`, `fetch`, `fact_check_search`, `rss_fetch`, and `youtube_transcript`.
+- List Tools → should show `search`, `fetch`, `fact_check_search`, and `rss_fetch`.
 - Call `search` with a test query, then `fetch` using a returned `id`.
  - Call `fact_check_search` with a query like: `"vaccine microchips"` (requires `GOOGLE_FACT_CHECK_API_KEY`).
- - Call `youtube_transcript` with `url_or_id` like: `https://youtu.be/dQw4w9WgXcQ` and optional `languages` like `["en"]`.
 
 ---
 
@@ -125,7 +126,7 @@ npx @modelcontextprotocol/inspector@latest
 - `fetch(id: string)` → returns the full text for a given file ID using the OpenAI Vector Store Files API.
 - `fact_check_search(query: string, language_code?: string = "en", page_size?: number = 10, page_token?: string)` → searches Google Fact Check Tools for claims and returns `{ text, claimant, claimDate, reviews: [{ publisher, url, title, reviewDate, textualRating, languageCode }] }` and an optional `nextPageToken`.
  - `rss_fetch(limit?: number = 10)` → returns recent items from the BBC Technology RSS feed: `https://feeds.bbci.co.uk/news/technology/rss.xml`.
- - `youtube_transcript(url_or_id: string, languages?: string[])` → fetches a video's transcript using `youtube-transcript-api`. Provide a full YouTube URL or a raw 11‑char video ID. Optionally pass preferred languages, e.g., `["en", "en-US"]`. Returns `{ videoId, sourceUrl, segments: [{ start, duration, text }], text }`.
+ - `youtube_transcript(video: string, languages?: string[], translate_to?: string)` → fetches captions for a YouTube video by URL or ID. Returns `{ videoId, url, language, translatedLanguage?, segments: [{ text, start, duration }...], text, availableLanguages }`. Does not require a YouTube API key.
 
 Both tools require a valid access token. The server enforces token verification with Auth0’s JWKS and checks the `user` permission (scope) if present.
 
@@ -135,7 +136,9 @@ Both tools require a valid access token. The server enforces token verification 
 
 - `server/app.py`
   - Configures the MCP server via `FastMCP`.
-  - Declares `search`, `fetch`, `fact_check_search`, `rss_fetch`, and `youtube_transcript` tools.
+  - Declares `search`, `fetch`, and `fact_check_search` tools and routes tool calls.
+
+- `server/tools/fact_check.py`: Tool module.
 
 ---
 

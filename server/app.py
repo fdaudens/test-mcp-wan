@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import os
 from typing import Any
+import re
+from urllib.parse import urlparse, parse_qs
 
 import datetime as dt
 import httpx
 import feedparser
-import re
-import asyncio
-from urllib.parse import urlparse, parse_qs
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -31,6 +30,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID")
 GOOGLE_FACT_CHECK_API_KEY = os.getenv("GOOGLE_FACT_CHECK_API_KEY")
 GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # Not required for transcript tool
 
 # ---- Simple token verifier (replace with real validation in prod) ----
 class SimpleTokenVerifier(TokenVerifier):
@@ -65,6 +65,172 @@ mcp.settings.streamable_http_path = "/sse"
 def _openai_client() -> OpenAI:
     # If OPENAI_API_KEY is unset, OpenAI() will use env/ambient config if available.
     return OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else OpenAI()
+
+
+### YOUTUBE TRANSCRIPT ###
+
+try:
+    from youtube_transcript_api import (
+        YouTubeTranscriptApi,
+        TranscriptsDisabled,
+        NoTranscriptFound,
+        VideoUnavailable,
+        TooManyRequests,
+    )
+except Exception:
+    YouTubeTranscriptApi = None  # type: ignore
+    TranscriptsDisabled = NoTranscriptFound = VideoUnavailable = TooManyRequests = Exception  # type: ignore
+
+
+def _extract_youtube_video_id(video: str) -> str | None:
+    """
+    Extract a YouTube video ID from a URL or return the ID if already provided.
+    Supports standard, short, embed, and shorts URLs.
+    """
+    if not video:
+        return None
+    # Already an ID?
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", video):
+        return video
+    try:
+        parsed = urlparse(video)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or ""
+        if host in {"youtu.be", "www.youtu.be"}:
+            candidate = path.lstrip("/").split("/")[0]
+            return candidate if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate) else None
+        if host in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+            if path == "/watch":
+                v = parse_qs(parsed.query or "").get("v", [None])[0]
+                if v and re.fullmatch(r"[A-Za-z0-9_-]{11}", v):
+                    return v
+            for prefix in ("/embed/", "/shorts/"):
+                if path.startswith(prefix):
+                    candidate = path[len(prefix):].split("/")[0]
+                    return candidate if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate) else None
+    except Exception:
+        return None
+    return None
+
+
+@mcp.tool()
+async def youtube_transcript(
+    video: str,
+    languages: list[str] | None = None,
+    translate_to: str | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch the transcript for a YouTube video.
+
+    Args:
+    - video: A YouTube URL or 11-char video ID.
+    - languages: Preferred languages (e.g., ["en","en-US"]). Fallbacks applied.
+    - translate_to: Optional target language code (e.g., "en").
+
+    Returns: {
+      "videoId",
+      "url",
+      "language",
+      "translatedLanguage": optional,
+      "segments": [{"text","start","duration"}...],
+      "text": joined string of transcript
+      "availableLanguages": [{"language","languageCode","isGenerated"}...]
+    }
+
+    Notes:
+    - Does not require a YouTube API key. Uses public transcript endpoints.
+    """
+    if YouTubeTranscriptApi is None:
+        return {"error": "Missing dependency: youtube-transcript-api. Ask the server admin to install it."}
+
+    video_id = _extract_youtube_video_id(video)
+    if not video_id:
+        return {"error": "Invalid YouTube URL or video ID."}
+
+    preferred_langs = list(languages or ["en", "en-US", "en-GB"])  # copy
+
+    try:
+        transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        # Build available languages list for output
+        available_languages = []
+        try:
+            for t in transcripts:  # type: ignore
+                available_languages.append(
+                    {
+                        "language": getattr(t, "language", None),
+                        "languageCode": getattr(t, "language_code", None),
+                        "isGenerated": bool(getattr(t, "is_generated", False)),
+                    }
+                )
+        except Exception:
+            pass
+
+        # Choose a transcript based on preference
+        transcript = None
+        try:
+            transcript = transcripts.find_transcript(preferred_langs)
+        except Exception:
+            # Prefer manually created if possible
+            try:
+                transcript = transcripts.find_manually_created_transcript(preferred_langs)
+            except Exception:
+                try:
+                    transcript = transcripts.find_generated_transcript(preferred_langs)
+                except Exception:
+                    # Fallback to first available
+                    try:
+                        transcript = next(iter(transcripts))  # type: ignore
+                    except Exception:
+                        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "availableLanguages": available_languages, "error": "No transcript available."}
+
+        # Optional translation
+        translated_language: str | None = None
+        try:
+            if translate_to:
+                transcript = transcript.translate(translate_to)  # type: ignore
+                translated_language = translate_to
+        except Exception:
+            # If translation fails, continue with the original transcript
+            translated_language = None
+
+        data = transcript.fetch()  # type: ignore
+        segments = [
+            {
+                "text": s.get("text"),
+                "start": s.get("start"),
+                "duration": s.get("duration"),
+            }
+            for s in (data or [])
+            if isinstance(s, dict)
+        ]
+        joined_text = " ".join([s.get("text") or "" for s in segments]).strip()
+
+        language_code = None
+        try:
+            language_code = getattr(transcript, "language_code", None)
+        except Exception:
+            pass
+
+        return {
+            "videoId": video_id,
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "language": language_code,
+            "translatedLanguage": translated_language,
+            "segments": segments,
+            "text": joined_text,
+            "availableLanguages": available_languages,
+        }
+    except TranscriptsDisabled:
+        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": "Transcripts are disabled for this video."}
+    except NoTranscriptFound:
+        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": "No transcript found for the requested languages."}
+    except VideoUnavailable:
+        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": "Video is unavailable."}
+    except TooManyRequests:
+        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": "Rate limited by YouTube. Try again later."}
+    except Exception as e:
+        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": f"Failed to fetch transcript: {e}"}
 
 @mcp.tool()
 async def search(query: str) -> dict[str, Any]:
@@ -437,246 +603,6 @@ async def guardian_search(
         return {"results": results, "error": f"HTTP {e.response.status_code}: {e.response.text[:300]}"}
     except Exception as e:
         return {"results": results, "error": f"Request failed: {e}"}
-
-
-### YOUTUBE TRANSCRIPT ###
-
-def _extract_youtube_video_id(url_or_id: str) -> str | None:
-    """
-    Extract a YouTube video ID from a full URL or return the given ID if it already looks like one.
-    Supports standard watch URLs, youtu.be short links, and /live/ URLs.
-    """
-    if not url_or_id:
-        return None
-    candidate = url_or_id.strip()
-
-    # Looks like a plain video ID
-    if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
-        return candidate
-
-    try:
-        parsed = urlparse(candidate)
-        host = (parsed.netloc or "").lower()
-        if "youtube.com" in host or "youtube-nocookie.com" in host:
-            # Standard watch URL: https://www.youtube.com/watch?v=VIDEO_ID
-            qs = parse_qs(parsed.query or "")
-            v = qs.get("v", [None])[0]
-            if v and re.fullmatch(r"[A-Za-z0-9_-]{11}", v):
-                return v
-            # Live/other path: e.g., /live/VIDEO_ID, /embed/VIDEO_ID, /shorts/VIDEO_ID
-            parts = [p for p in (parsed.path or "").split("/") if p]
-            if len(parts) >= 2 and parts[0] in {"live", "embed", "shorts"}:
-                vid = parts[1]
-                if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
-                    return vid
-        if "youtu.be" in host:
-            # Short URL: https://youtu.be/VIDEO_ID
-            parts = [p for p in (parsed.path or "").split("/") if p]
-            if parts:
-                vid = parts[0]
-                if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
-                    return vid
-    except Exception:
-        pass
-
-    return None
-
-
-@mcp.tool()
-async def youtube_transcript(
-    url_or_id: str,
-    languages: list[str] | None = None,
-) -> dict[str, Any]:
-    """
-    Fetch a YouTube video's transcript.
-
-    Args:
-    - url_or_id: A full YouTube URL (watch, youtu.be, live) or a raw 11-char video ID.
-    - languages: Optional list of language codes to prefer (e.g., ["en", "en-US"]).
-
-    Returns: {"videoId","sourceUrl","segments":[{"start","duration","text"}...],"text"}
-    """
-    from youtube_transcript_api import YouTubeTranscriptApi
-    try:
-        from youtube_transcript_api._errors import (  # type: ignore
-            TranscriptsDisabled,
-            NoTranscriptFound,
-            VideoUnavailable,
-        )
-    except Exception:  # Newer versions may not expose _errors publicly
-        class TranscriptsDisabled(Exception):
-            pass
-        class NoTranscriptFound(Exception):
-            pass
-        class VideoUnavailable(Exception):
-            pass
-
-    video_id = _extract_youtube_video_id(url_or_id)
-    if not video_id:
-        return {"error": "Invalid YouTube URL or video ID", "input": url_or_id}
-
-    preferred_langs = languages or []
-    try:
-        # Preferred (latest API): instance methods
-        api = YouTubeTranscriptApi()
-        fetch_method = getattr(api, "fetch", None)
-        transcript_raw: list[dict[str, Any]] | None = None
-        if callable(fetch_method):
-            fetched = await asyncio.to_thread(
-                fetch_method,
-                video_id,
-                languages=preferred_langs if preferred_langs else None,
-            )
-            # Convert FetchedTranscript → raw list of dicts
-            if hasattr(fetched, "to_raw_data"):
-                transcript_raw = list(await asyncio.to_thread(fetched.to_raw_data))
-            else:
-                # Fallback: iterate over snippets
-                try:
-                    transcript_raw = [
-                        {"text": s.text, "start": float(s.start), "duration": float(s.duration)}
-                        for s in fetched  # type: ignore
-                    ]
-                except Exception:
-                    transcript_raw = None
-        if transcript_raw is None:
-            # Next: list() API from latest versions
-            list_method = getattr(api, "list", None)
-            if callable(list_method):
-                tlist = await asyncio.to_thread(list_method, video_id)
-                transcript_obj = None
-                if preferred_langs:
-                    for finder in ("find_transcript", "find_generated_transcript", "find_manually_created_transcript"):
-                        fm = getattr(tlist, finder, None)
-                        if callable(fm):
-                            try:
-                                transcript_obj = fm(preferred_langs)
-                                if transcript_obj:
-                                    break
-                            except Exception:
-                                pass
-                if transcript_obj is None:
-                    try:
-                        transcript_obj = next(iter(tlist))
-                    except Exception:
-                        transcript_obj = None
-                if transcript_obj is None:
-                    raise NoTranscriptFound("No transcript found for requested languages.")
-                fetched2 = await asyncio.to_thread(transcript_obj.fetch)
-                if hasattr(fetched2, "to_raw_data"):
-                    transcript_raw = list(await asyncio.to_thread(fetched2.to_raw_data))
-                else:
-                    try:
-                        transcript_raw = [
-                            {"text": s.text, "start": float(s.start), "duration": float(s.duration)}
-                            for s in fetched2  # type: ignore
-                        ]
-                    except Exception:
-                        transcript_raw = None
-        # Final: legacy class-based methods
-        if transcript_raw is None:
-            transcript: list[dict[str, Any]]
-            get_transcript_fn = getattr(YouTubeTranscriptApi, "get_transcript", None)
-            if callable(get_transcript_fn):
-                if preferred_langs:
-                    transcript = await asyncio.to_thread(get_transcript_fn, video_id, preferred_langs)
-                else:
-                    transcript = await asyncio.to_thread(get_transcript_fn, video_id)
-            else:
-                list_transcripts_fn = getattr(YouTubeTranscriptApi, "list_transcripts", None)
-                if callable(list_transcripts_fn):
-                    downloader = await asyncio.to_thread(list_transcripts_fn, video_id)
-                    transcript_obj2 = None
-                    if preferred_langs:
-                        for finder in ("find_transcript", "find_generated_transcript", "find_manually_created_transcript"):
-                            fm = getattr(downloader, finder, None)
-                            if callable(fm):
-                                try:
-                                    transcript_obj2 = fm(preferred_langs)
-                                    if transcript_obj2:
-                                        break
-                                except Exception:
-                                    pass
-                    if transcript_obj2 is None:
-                        try:
-                            transcript_obj2 = next(iter(downloader))
-                        except Exception:
-                            transcript_obj2 = None
-                    if transcript_obj2 is None:
-                        raise NoTranscriptFound("No transcript found for requested languages.")
-                    transcript = await asyncio.to_thread(transcript_obj2.fetch)
-                else:
-                    # Batch legacy API
-                    get_transcripts_fn = getattr(YouTubeTranscriptApi, "get_transcripts", None)
-                    if not callable(get_transcripts_fn):
-                        raise AttributeError("youtube-transcript-api: no usable API (fetch/list or legacy) available")
-                    result = await asyncio.to_thread(
-                        get_transcripts_fn,
-                        [video_id],
-                        preferred_langs if preferred_langs else None,
-                    )
-                    transcripts_map = None
-                    errors_map = None
-                    if isinstance(result, tuple) and len(result) >= 1:
-                        transcripts_map = result[0]
-                        if len(result) >= 2:
-                            errors_map = result[1]
-                    elif isinstance(result, dict):
-                        transcripts_map = result
-                    if transcripts_map and video_id in transcripts_map:
-                        transcript = transcripts_map[video_id]
-                    else:
-                        if errors_map and video_id in errors_map:
-                            raise errors_map[video_id]
-                        raise NoTranscriptFound("No transcript found via get_transcripts.")
-            transcript_raw = transcript
-
-        # Normalize transcript_raw → segments
-        segments: list[dict[str, Any]] = []
-        parts: list[str] = []
-        for seg in transcript_raw or []:
-            text = (seg.get("text") or "").strip()
-            start = float(seg.get("start") or 0.0)
-            duration = float(seg.get("duration") or 0.0)
-            if text:
-                parts.append(text)
-            segments.append({"start": start, "duration": duration, "text": text})
-
-        full_text = " ".join(parts).strip()
-        return {
-            "videoId": video_id,
-            "sourceUrl": f"https://www.youtube.com/watch?v={video_id}",
-            "segments": segments,
-            "text": full_text,
-        }
-        # transcript is a list of {"text","start","duration"}
-        segments: list[dict[str, Any]] = []
-        parts: list[str] = []
-        for seg in transcript or []:
-            text = (seg.get("text") or "").strip()
-            start = float(seg.get("start") or 0.0)
-            duration = float(seg.get("duration") or 0.0)
-            if text:
-                parts.append(text)
-            segments.append({"start": start, "duration": duration, "text": text})
-
-        full_text = " ".join(parts).strip()
-        return {
-            "videoId": video_id,
-            "sourceUrl": f"https://www.youtube.com/watch?v={video_id}",
-            "segments": segments,
-            "text": full_text,
-        }
-    except TranscriptsDisabled:
-        return {"error": "Transcripts are disabled for this video.", "videoId": video_id}
-    except NoTranscriptFound:
-        return {"error": "No transcript found for requested languages.", "videoId": video_id, "languages": preferred_langs}
-    # Older versions of youtube-transcript-api may not expose a specific
-    # TooManyRequests exception; treat rate limits as generic failures.
-    except VideoUnavailable:
-        return {"error": "Video unavailable.", "videoId": video_id}
-    except Exception as e:
-        return {"error": f"Failed to fetch transcript: {e}", "videoId": video_id}
 
 
 app = mcp.streamable_http_app()
