@@ -501,7 +501,6 @@ async def youtube_transcript(
         TranscriptsDisabled,
         NoTranscriptFound,
         VideoUnavailable,
-        TooManyRequests,
     )
 
     video_id = _extract_youtube_video_id(url_or_id)
@@ -538,8 +537,8 @@ async def youtube_transcript(
         return {"error": "Transcripts are disabled for this video.", "videoId": video_id}
     except NoTranscriptFound:
         return {"error": "No transcript found for requested languages.", "videoId": video_id, "languages": preferred_langs}
-    except TooManyRequests:
-        return {"error": "Rate limited by YouTube. Please try again later.", "videoId": video_id}
+    # Older versions of youtube-transcript-api may not expose a specific
+    # TooManyRequests exception; treat rate limits as generic failures.
     except VideoUnavailable:
         return {"error": "Video unavailable.", "videoId": video_id}
     except Exception as e:
