@@ -10,4 +10,4 @@ feedparser>=6.0.11
 # Google Analytics Admin and Data API clients
 google-analytics-admin>=0.24.0
 google-analytics-data>=0.18.8
-youtube-transcript-api>=0.6.2
+youtube-transcript-api
