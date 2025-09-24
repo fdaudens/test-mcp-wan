@@ -126,7 +126,10 @@ npx @modelcontextprotocol/inspector@latest
 - `fetch(id: string)` → returns the full text for a given file ID using the OpenAI Vector Store Files API.
 - `fact_check_search(query: string, language_code?: string = "en", page_size?: number = 10, page_token?: string)` → searches Google Fact Check Tools for claims and returns `{ text, claimant, claimDate, reviews: [{ publisher, url, title, reviewDate, textualRating, languageCode }] }` and an optional `nextPageToken`.
  - `rss_fetch(limit?: number = 10)` → returns recent items from the BBC Technology RSS feed: `https://feeds.bbci.co.uk/news/technology/rss.xml`.
- - `youtube_transcript(video: string, languages?: string[])` → fetches captions for a YouTube video by URL or ID using yt-dlp. Returns `{ videoId, url, language, segments: [{ text, start, duration }...], text, availableLanguages }`. No translation; does not require a YouTube API key.
+ - `youtube_transcript(video: string, languages?: string[], cookies_from_browser?: string, browser_profile?: string, use_keyring?: boolean, cookie_file_path?: string, cookie_string?: string)` → fetches captions via yt-dlp. Returns `{ videoId, url, language, segments, text, availableLanguages, needsCookies?, tips? }`. No translation; no API key required. When YouTube requires login/bot check, pass cookies using one of:
+   - `cookies_from_browser`: e.g., `"chrome"`, `"firefox"`, `"safari"` (optionally `browser_profile`, `use_keyring`).
+   - `cookie_file_path`: path to a Netscape `cookies.txt` file.
+   - `cookie_string`: raw `Cookie` header string as a last resort.
 
 Both tools require a valid access token. The server enforces token verification with Auth0’s JWKS and checks the `user` permission (scope) if present.
 

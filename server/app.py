@@ -109,6 +109,11 @@ def _extract_youtube_video_id(video: str) -> str | None:
 async def youtube_transcript(
     video: str,
     languages: list[str] | None = None,
+    cookies_from_browser: str | None = None,
+    browser_profile: str | None = None,
+    use_keyring: bool | None = None,
+    cookie_file_path: str | None = None,
+    cookie_string: str | None = None,
 ) -> dict[str, Any]:
     """
     Fetch the transcript for a YouTube video using yt-dlp.
@@ -116,6 +121,11 @@ async def youtube_transcript(
     Args:
     - video: A YouTube URL or 11-char video ID.
     - languages: Preferred languages (e.g., ["en","en-US"]). Fallbacks applied.
+    - cookies_from_browser: Optional browser name for yt-dlp cookies (e.g., "chrome", "firefox", "safari").
+    - browser_profile: Optional browser profile name/id when using cookies_from_browser.
+    - use_keyring: Optional flag to allow keyring access when using cookies_from_browser.
+    - cookie_file_path: Optional path to a cookies.txt (Netscape) file for yt-dlp.
+    - cookie_string: Optional raw Cookie header string; used for network requests.
 
     Returns: {
       "videoId",
@@ -141,7 +151,7 @@ async def youtube_transcript(
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     # yt-dlp options to extract subtitles/captions without downloading media
-    ydl_opts = {
+    ydl_opts: dict[str, Any] = {
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
@@ -153,11 +163,42 @@ async def youtube_transcript(
         "dump_single_json": True,
     }
 
+    # Cookies support for restricted videos or bot checks
+    if cookie_file_path:
+        ydl_opts["cookiefile"] = cookie_file_path
+    if cookies_from_browser:
+        # Tuple format: (browser, profile, keyring). Profile/keyring can be None.
+        ydl_opts["cookiesfrombrowser"] = (
+            cookies_from_browser,
+            browser_profile,
+            True if use_keyring is None else bool(use_keyring),
+        )
+    if cookie_string:
+        headers = ydl_opts.get("http_headers", {})
+        headers["Cookie"] = cookie_string
+        ydl_opts["http_headers"] = headers
+
     try:
         with YoutubeDL(ydl_opts) as ydl:  # type: ignore
             info = ydl.extract_info(url, download=False)
     except Exception as e:
-        return {"videoId": video_id, "url": url, "segments": [], "text": "", "error": f"Failed to extract info: {e}"}
+        msg = str(e)
+        needs_cookies = (
+            "cookies" in msg.lower()
+            or "sign in" in msg.lower()
+            or "not a bot" in msg.lower()
+            or "confirm" in msg.lower()
+        )
+        out = {"videoId": video_id, "url": url, "segments": [], "text": "", "error": f"Failed to extract info: {msg}"}
+        if needs_cookies:
+            out["needsCookies"] = True
+            out["tips"] = [
+                "Provide cookies_from_browser (e.g., 'chrome', 'firefox', 'safari').",
+                "Or provide cookie_file_path to a Netscape cookies.txt file.",
+                "Optionally include browser_profile and set use_keyring when needed.",
+                "As a last resort, pass a Cookie header string via cookie_string.",
+            ]
+        return out
 
     # Captions are in info.get('automatic_captions') and/or info.get('subtitles') keyed by lang
     captions = info.get("subtitles") or {}
@@ -218,7 +259,10 @@ async def youtube_transcript(
         return {"videoId": video_id, "url": url, "segments": [], "text": "", "availableLanguages": available_languages, "error": "Caption URL missing."}
 
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        request_headers: dict[str, str] = {}
+        if cookie_string:
+            request_headers["Cookie"] = cookie_string
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=request_headers) as client:
             resp = await client.get(caption_url)
             resp.raise_for_status()
             caption_body = resp.text or ""
