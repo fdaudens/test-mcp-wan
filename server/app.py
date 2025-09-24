@@ -111,7 +111,7 @@ async def youtube_transcript(
     languages: list[str] | None = None,
     cookies_from_browser: str | None = None,
     browser_profile: str | None = None,
-    use_keyring: bool | None = None,
+    keyring_backend: str | None = None,
     cookie_file_path: str | None = None,
     cookie_string: str | None = None,
 ) -> dict[str, Any]:
@@ -123,7 +123,7 @@ async def youtube_transcript(
     - languages: Preferred languages (e.g., ["en","en-US"]). Fallbacks applied.
     - cookies_from_browser: Optional browser name for yt-dlp cookies (e.g., "chrome", "firefox", "safari").
     - browser_profile: Optional browser profile name/id when using cookies_from_browser.
-    - use_keyring: Optional flag to allow keyring access when using cookies_from_browser.
+    - keyring_backend: Optional keyring backend name for decrypting browser cookies (e.g., "keyring"). Omit to auto.
     - cookie_file_path: Optional path to a cookies.txt (Netscape) file for yt-dlp.
     - cookie_string: Optional raw Cookie header string; used for network requests.
 
@@ -167,12 +167,13 @@ async def youtube_transcript(
     if cookie_file_path:
         ydl_opts["cookiefile"] = cookie_file_path
     if cookies_from_browser:
-        # Tuple format: (browser, profile, keyring). Profile/keyring can be None.
-        ydl_opts["cookiesfrombrowser"] = (
-            cookies_from_browser,
-            browser_profile,
-            True if use_keyring is None else bool(use_keyring),
-        )
+        # Tuple order expected by yt-dlp: (browser, profile[, keyring])
+        if browser_profile and keyring_backend:
+            ydl_opts["cookiesfrombrowser"] = (cookies_from_browser, browser_profile, keyring_backend)
+        elif browser_profile:
+            ydl_opts["cookiesfrombrowser"] = (cookies_from_browser, browser_profile)
+        else:
+            ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
     if cookie_string:
         headers = ydl_opts.get("http_headers", {})
         headers["Cookie"] = cookie_string
