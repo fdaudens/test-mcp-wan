@@ -497,11 +497,19 @@ async def youtube_transcript(
     Returns: {"videoId","sourceUrl","segments":[{"start","duration","text"}...],"text"}
     """
     from youtube_transcript_api import YouTubeTranscriptApi
-    from youtube_transcript_api._errors import (  # type: ignore
-        TranscriptsDisabled,
-        NoTranscriptFound,
-        VideoUnavailable,
-    )
+    try:
+        from youtube_transcript_api._errors import (  # type: ignore
+            TranscriptsDisabled,
+            NoTranscriptFound,
+            VideoUnavailable,
+        )
+    except Exception:  # Newer versions may not expose _errors publicly
+        class TranscriptsDisabled(Exception):
+            pass
+        class NoTranscriptFound(Exception):
+            pass
+        class VideoUnavailable(Exception):
+            pass
 
     video_id = _extract_youtube_video_id(url_or_id)
     if not video_id:
@@ -509,63 +517,138 @@ async def youtube_transcript(
 
     preferred_langs = languages or []
     try:
-        # Try new/old API: prefer get_transcript if available, then list_transcripts, then get_transcripts
-        transcript: list[dict[str, Any]]
-        get_transcript_fn = getattr(YouTubeTranscriptApi, "get_transcript", None)
-        if callable(get_transcript_fn):
-            # Use a thread to avoid blocking the event loop
-            if preferred_langs:
-                transcript = await asyncio.to_thread(get_transcript_fn, video_id, preferred_langs)
+        # Preferred (latest API): instance methods
+        api = YouTubeTranscriptApi()
+        fetch_method = getattr(api, "fetch", None)
+        transcript_raw: list[dict[str, Any]] | None = None
+        if callable(fetch_method):
+            fetched = await asyncio.to_thread(
+                fetch_method,
+                video_id,
+                languages=preferred_langs if preferred_langs else None,
+            )
+            # Convert FetchedTranscript → raw list of dicts
+            if hasattr(fetched, "to_raw_data"):
+                transcript_raw = list(await asyncio.to_thread(fetched.to_raw_data))
             else:
-                transcript = await asyncio.to_thread(get_transcript_fn, video_id)
-        else:
-            list_transcripts_fn = getattr(YouTubeTranscriptApi, "list_transcripts", None)
-            if callable(list_transcripts_fn):
-                downloader = await asyncio.to_thread(list_transcripts_fn, video_id)
+                # Fallback: iterate over snippets
+                try:
+                    transcript_raw = [
+                        {"text": s.text, "start": float(s.start), "duration": float(s.duration)}
+                        for s in fetched  # type: ignore
+                    ]
+                except Exception:
+                    transcript_raw = None
+        if transcript_raw is None:
+            # Next: list() API from latest versions
+            list_method = getattr(api, "list", None)
+            if callable(list_method):
+                tlist = await asyncio.to_thread(list_method, video_id)
                 transcript_obj = None
                 if preferred_langs:
-                    try:
-                        transcript_obj = downloader.find_transcript(preferred_langs)
-                    except Exception:
-                        try:
-                            transcript_obj = downloader.find_generated_transcript(preferred_langs)
-                        except Exception:
-                            transcript_obj = None
-                # Fallback: pick the first available transcript
+                    for finder in ("find_transcript", "find_generated_transcript", "find_manually_created_transcript"):
+                        fm = getattr(tlist, finder, None)
+                        if callable(fm):
+                            try:
+                                transcript_obj = fm(preferred_langs)
+                                if transcript_obj:
+                                    break
+                            except Exception:
+                                pass
                 if transcript_obj is None:
                     try:
-                        transcript_obj = next(iter(downloader))
+                        transcript_obj = next(iter(tlist))
                     except Exception:
                         transcript_obj = None
                 if transcript_obj is None:
                     raise NoTranscriptFound("No transcript found for requested languages.")
-                transcript = await asyncio.to_thread(transcript_obj.fetch)
-            else:
-                # Final fallback: batch API get_transcripts(video_ids, languages)
-                get_transcripts_fn = getattr(YouTubeTranscriptApi, "get_transcripts", None)
-                if not callable(get_transcripts_fn):
-                    raise AttributeError("youtube-transcript-api: no get_transcript, list_transcripts or get_transcripts API available")
-                # Run in thread and normalize return shape across versions
-                result = await asyncio.to_thread(
-                    get_transcripts_fn,
-                    [video_id],
-                    preferred_langs if preferred_langs else None,
-                )
-                transcripts_map = None
-                errors_map = None
-                if isinstance(result, tuple) and len(result) >= 1:
-                    transcripts_map = result[0]
-                    if len(result) >= 2:
-                        errors_map = result[1]
-                elif isinstance(result, dict):
-                    transcripts_map = result
-                if transcripts_map and video_id in transcripts_map:
-                    transcript = transcripts_map[video_id]
+                fetched2 = await asyncio.to_thread(transcript_obj.fetch)
+                if hasattr(fetched2, "to_raw_data"):
+                    transcript_raw = list(await asyncio.to_thread(fetched2.to_raw_data))
                 else:
-                    # Raise the collected error if present
-                    if errors_map and video_id in errors_map:
-                        raise errors_map[video_id]
-                    raise NoTranscriptFound("No transcript found via get_transcripts.")
+                    try:
+                        transcript_raw = [
+                            {"text": s.text, "start": float(s.start), "duration": float(s.duration)}
+                            for s in fetched2  # type: ignore
+                        ]
+                    except Exception:
+                        transcript_raw = None
+        # Final: legacy class-based methods
+        if transcript_raw is None:
+            transcript: list[dict[str, Any]]
+            get_transcript_fn = getattr(YouTubeTranscriptApi, "get_transcript", None)
+            if callable(get_transcript_fn):
+                if preferred_langs:
+                    transcript = await asyncio.to_thread(get_transcript_fn, video_id, preferred_langs)
+                else:
+                    transcript = await asyncio.to_thread(get_transcript_fn, video_id)
+            else:
+                list_transcripts_fn = getattr(YouTubeTranscriptApi, "list_transcripts", None)
+                if callable(list_transcripts_fn):
+                    downloader = await asyncio.to_thread(list_transcripts_fn, video_id)
+                    transcript_obj2 = None
+                    if preferred_langs:
+                        for finder in ("find_transcript", "find_generated_transcript", "find_manually_created_transcript"):
+                            fm = getattr(downloader, finder, None)
+                            if callable(fm):
+                                try:
+                                    transcript_obj2 = fm(preferred_langs)
+                                    if transcript_obj2:
+                                        break
+                                except Exception:
+                                    pass
+                    if transcript_obj2 is None:
+                        try:
+                            transcript_obj2 = next(iter(downloader))
+                        except Exception:
+                            transcript_obj2 = None
+                    if transcript_obj2 is None:
+                        raise NoTranscriptFound("No transcript found for requested languages.")
+                    transcript = await asyncio.to_thread(transcript_obj2.fetch)
+                else:
+                    # Batch legacy API
+                    get_transcripts_fn = getattr(YouTubeTranscriptApi, "get_transcripts", None)
+                    if not callable(get_transcripts_fn):
+                        raise AttributeError("youtube-transcript-api: no usable API (fetch/list or legacy) available")
+                    result = await asyncio.to_thread(
+                        get_transcripts_fn,
+                        [video_id],
+                        preferred_langs if preferred_langs else None,
+                    )
+                    transcripts_map = None
+                    errors_map = None
+                    if isinstance(result, tuple) and len(result) >= 1:
+                        transcripts_map = result[0]
+                        if len(result) >= 2:
+                            errors_map = result[1]
+                    elif isinstance(result, dict):
+                        transcripts_map = result
+                    if transcripts_map and video_id in transcripts_map:
+                        transcript = transcripts_map[video_id]
+                    else:
+                        if errors_map and video_id in errors_map:
+                            raise errors_map[video_id]
+                        raise NoTranscriptFound("No transcript found via get_transcripts.")
+            transcript_raw = transcript
+
+        # Normalize transcript_raw → segments
+        segments: list[dict[str, Any]] = []
+        parts: list[str] = []
+        for seg in transcript_raw or []:
+            text = (seg.get("text") or "").strip()
+            start = float(seg.get("start") or 0.0)
+            duration = float(seg.get("duration") or 0.0)
+            if text:
+                parts.append(text)
+            segments.append({"start": start, "duration": duration, "text": text})
+
+        full_text = " ".join(parts).strip()
+        return {
+            "videoId": video_id,
+            "sourceUrl": f"https://www.youtube.com/watch?v={video_id}",
+            "segments": segments,
+            "text": full_text,
+        }
         # transcript is a list of {"text","start","duration"}
         segments: list[dict[str, Any]] = []
         parts: list[str] = []
