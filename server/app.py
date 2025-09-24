@@ -45,13 +45,7 @@ class SimpleTokenVerifier(TokenVerifier):
 mcp = FastMCP(
     name="python-authenticated-mcp",
     instructions="Authenticated MCP server in Python. Implements `search` and `fetch` with OpenAI Vector Stores.",
-    # If you prefer stateless requests, set stateless_http=True
-    token_verifier=SimpleTokenVerifier(),
-    auth=AuthSettings(
-        issuer_url=AnyHttpUrl(AUTH_ISSUER),
-        resource_server_url=AnyHttpUrl(RESOURCE_SERVER_URL),
-        required_scopes=REQUIRED_SCOPES,
-    ),
+    # Authentication disabled for now
 )
 
 # Mount Streamable HTTP at a dedicated path to avoid conflicts with root
