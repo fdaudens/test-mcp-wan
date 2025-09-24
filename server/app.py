@@ -7,6 +7,9 @@ from typing import Any
 import datetime as dt
 import httpx
 import feedparser
+import re
+import asyncio
+from urllib.parse import urlparse, parse_qs
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -436,297 +439,111 @@ async def guardian_search(
         return {"results": results, "error": f"Request failed: {e}"}
 
 
-# =====================
-# Google Analytics MCP
-# =====================
+### YOUTUBE TRANSCRIPT ###
 
-# Notes:
-# - These tools use Application Default Credentials (ADC). Ensure one of the following:
-#   - Set GOOGLE_APPLICATION_CREDENTIALS to a JSON credentials file path, OR
-#   - Run `gcloud auth application-default login` and enable the Analytics APIs.
-# - Required APIs: Google Analytics Admin API, Google Analytics Data API
+def _extract_youtube_video_id(url_or_id: str) -> str | None:
+    """
+    Extract a YouTube video ID from a full URL or return the given ID if it already looks like one.
+    Supports standard watch URLs, youtu.be short links, and /live/ URLs.
+    """
+    if not url_or_id:
+        return None
+    candidate = url_or_id.strip()
 
+    # Looks like a plain video ID
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
+        return candidate
 
-def _format_ga_dimension_or_metric(value: str) -> str:
-    return value.strip()
+    try:
+        parsed = urlparse(candidate)
+        host = (parsed.netloc or "").lower()
+        if "youtube.com" in host or "youtube-nocookie.com" in host:
+            # Standard watch URL: https://www.youtube.com/watch?v=VIDEO_ID
+            qs = parse_qs(parsed.query or "")
+            v = qs.get("v", [None])[0]
+            if v and re.fullmatch(r"[A-Za-z0-9_-]{11}", v):
+                return v
+            # Live/other path: e.g., /live/VIDEO_ID, /embed/VIDEO_ID, /shorts/VIDEO_ID
+            parts = [p for p in (parsed.path or "").split("/") if p]
+            if len(parts) >= 2 and parts[0] in {"live", "embed", "shorts"}:
+                vid = parts[1]
+                if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+                    return vid
+        if "youtu.be" in host:
+            # Short URL: https://youtu.be/VIDEO_ID
+            parts = [p for p in (parsed.path or "").split("/") if p]
+            if parts:
+                vid = parts[0]
+                if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+                    return vid
+    except Exception:
+        pass
+
+    return None
 
 
 @mcp.tool()
-async def analytics_get_account_summaries() -> dict[str, Any]:
-    """
-    List Google Analytics account and property summaries for the authenticated user.
-
-    Returns: {"accounts": [{"account": str, "displayName": str, "properties": [{"property": str, "displayName": str}] }]}
-    """
-    try:
-        # Import inside function to avoid hard dependency at import time
-        from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
-    except Exception as e:
-        return {"accounts": [], "error": f"Missing Google Analytics Admin client: {e}"}
-
-    try:
-        client = AnalyticsAdminServiceClient()
-        results: list[dict[str, Any]] = []
-        for summary in client.list_account_summaries():
-            props = []
-            for p in summary.property_summaries:
-                props.append({
-                    "property": getattr(p, "property", None),
-                    "displayName": getattr(p, "display_name", None),
-                })
-            results.append({
-                "account": getattr(summary, "account", None),
-                "displayName": getattr(summary, "display_name", None),
-                "properties": props,
-            })
-        return {"accounts": results}
-    except Exception as e:
-        return {"accounts": [], "error": f"Failed to list account summaries: {e}"}
-
-
-@mcp.tool()
-async def analytics_get_property_details(property_id: str) -> dict[str, Any]:
-    """
-    Get details for a GA4 property.
-
-    Args:
-    - property_id: Numeric property ID (e.g., "123456789") or full name ("properties/123456789").
-    """
-    try:
-        from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
-    except Exception as e:
-        return {"error": f"Missing Google Analytics Admin client: {e}"}
-
-    if not property_id:
-        return {"error": "property_id is required"}
-    name = property_id if str(property_id).startswith("properties/") else f"properties/{property_id}"
-
-    try:
-        client = AnalyticsAdminServiceClient()
-        p = client.get_property(name=name)
-        return {
-            "name": getattr(p, "name", None),
-            "propertyId": getattr(p, "name", "").split("/")[-1] if getattr(p, "name", None) else None,
-            "displayName": getattr(p, "display_name", None),
-            "currencyCode": getattr(p, "currency_code", None),
-            "timeZone": getattr(p, "time_zone", None),
-            "industryCategory": getattr(p, "industry_category", None),
-            "serviceLevel": getattr(p, "service_level", None),
-            "createTime": getattr(p, "create_time", None).isoformat() if getattr(p, "create_time", None) else None,
-            "updateTime": getattr(p, "update_time", None).isoformat() if getattr(p, "update_time", None) else None,
-        }
-    except Exception as e:
-        return {"error": f"Failed to get property: {e}"}
-
-
-@mcp.tool()
-async def analytics_list_google_ads_links(property_id: str) -> dict[str, Any]:
-    """
-    List Google Ads links for a given GA4 property.
-
-    Args:
-    - property_id: Numeric ID or "properties/{id}".
-    """
-    try:
-        from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
-    except Exception as e:
-        return {"links": [], "error": f"Missing Google Analytics Admin client: {e}"}
-
-    if not property_id:
-        return {"links": [], "error": "property_id is required"}
-    parent = property_id if str(property_id).startswith("properties/") else f"properties/{property_id}"
-
-    try:
-        client = AnalyticsAdminServiceClient()
-        links: list[dict[str, Any]] = []
-        for link in client.list_google_ads_links(parent=parent):
-            links.append({
-                "name": getattr(link, "name", None),
-                "customerId": getattr(link, "customer_id", None),
-                "canManageClients": getattr(link, "can_manage_clients", None),
-                "adsPersonalizationEnabled": getattr(link, "ads_personalization_enabled", None),
-                "emailAddress": getattr(link, "email_address", None),
-            })
-        return {"links": links}
-    except Exception as e:
-        return {"links": [], "error": f"Failed to list Google Ads links: {e}"}
-
-
-@mcp.tool()
-async def analytics_get_custom_dimensions_and_metrics(property_id: str) -> dict[str, Any]:
-    """
-    Retrieve custom dimensions and custom metrics for a GA4 property.
-
-    Args:
-    - property_id: Numeric ID or "properties/{id}".
-    """
-    try:
-        from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
-    except Exception as e:
-        return {"customDimensions": [], "customMetrics": [], "error": f"Missing Google Analytics Admin client: {e}"}
-
-    if not property_id:
-        return {"customDimensions": [], "customMetrics": [], "error": "property_id is required"}
-    parent = property_id if str(property_id).startswith("properties/") else f"properties/{property_id}"
-
-    try:
-        client = AnalyticsAdminServiceClient()
-        dims = []
-        mets = []
-        for d in client.list_custom_dimensions(parent=parent):
-            dims.append({
-                "name": getattr(d, "name", None),
-                "parameterName": getattr(d, "parameter_name", None),
-                "displayName": getattr(d, "display_name", None),
-                "scope": getattr(d, "scope", None),
-                "disallowAdsPersonalization": getattr(d, "disallow_ads_personalization", None),
-            })
-        for m in client.list_custom_metrics(parent=parent):
-            mets.append({
-                "name": getattr(m, "name", None),
-                "parameterName": getattr(m, "parameter_name", None),
-                "displayName": getattr(m, "display_name", None),
-                "measurementUnit": getattr(m, "measurement_unit", None),
-                "scope": getattr(m, "scope", None),
-            })
-        return {"customDimensions": dims, "customMetrics": mets}
-    except Exception as e:
-        return {"customDimensions": [], "customMetrics": [], "error": f"Failed to list custom resources: {e}"}
-
-
-@mcp.tool()
-async def analytics_run_report(
-    property_id: str,
-    dimensions: list[str],
-    metrics: list[str],
-    start_date: str,
-    end_date: str,
-    limit: int | None = 100,
+async def youtube_transcript(
+    url_or_id: str,
+    languages: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Run a GA4 core report.
+    Fetch a YouTube video's transcript.
 
     Args:
-    - property_id: Numeric ID or "properties/{id}".
-    - dimensions: List of dimension names (e.g., ["country", "city"]).
-    - metrics: List of metric names (e.g., ["activeUsers"]).
-    - start_date, end_date: Date strings like "2024-01-01" or relative like "7daysAgo".
-    - limit: Max rows to return (default 100).
+    - url_or_id: A full YouTube URL (watch, youtu.be, live) or a raw 11-char video ID.
+    - languages: Optional list of language codes to prefer (e.g., ["en", "en-US"]).
+
+    Returns: {"videoId","sourceUrl","segments":[{"start","duration","text"}...],"text"}
     """
+    from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api._errors import (  # type: ignore
+        TranscriptsDisabled,
+        NoTranscriptFound,
+        VideoUnavailable,
+        TooManyRequests,
+    )
+
+    video_id = _extract_youtube_video_id(url_or_id)
+    if not video_id:
+        return {"error": "Invalid YouTube URL or video ID", "input": url_or_id}
+
+    preferred_langs = languages or []
     try:
-        from google.analytics.data_v1beta import BetaAnalyticsDataClient
-        from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric
-    except Exception as e:
-        return {"rows": [], "error": f"Missing Google Analytics Data client: {e}"}
-
-    if not property_id:
-        return {"rows": [], "error": "property_id is required"}
-    if not dimensions or not metrics:
-        return {"rows": [], "error": "dimensions and metrics are required"}
-
-    name = property_id if str(property_id).startswith("properties/") else f"properties/{property_id}"
-
-    try:
-        client = BetaAnalyticsDataClient()
-        req = RunReportRequest(
-            property=name,
-            dimensions=[Dimension(name=_format_ga_dimension_or_metric(d)) for d in dimensions],
-            metrics=[Metric(name=_format_ga_dimension_or_metric(m)) for m in metrics],
-            date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
-            limit=max(1, int(limit or 100)),
+        # Use a thread to avoid blocking the event loop
+        transcript = await asyncio.to_thread(
+            YouTubeTranscriptApi.get_transcript,
+            video_id,
+            preferred_langs if preferred_langs else None,
         )
-        resp = client.run_report(req)
+        # transcript is a list of {"text","start","duration"}
+        segments: list[dict[str, Any]] = []
+        parts: list[str] = []
+        for seg in transcript or []:
+            text = (seg.get("text") or "").strip()
+            start = float(seg.get("start") or 0.0)
+            duration = float(seg.get("duration") or 0.0)
+            if text:
+                parts.append(text)
+            segments.append({"start": start, "duration": duration, "text": text})
 
-        dim_headers = [h.name for h in resp.dimension_headers]
-        met_headers = [h.name for h in resp.metric_headers]
-        rows: list[dict[str, Any]] = []
-        for r in resp.rows:
-            row: dict[str, Any] = {}
-            for i, dv in enumerate(r.dimension_values):
-                if i < len(dim_headers):
-                    row[dim_headers[i]] = dv.value
-            for j, mv in enumerate(r.metric_values):
-                if j < len(met_headers):
-                    row[met_headers[j]] = mv.value
-            rows.append(row)
-
+        full_text = " ".join(parts).strip()
         return {
-            "rowCount": getattr(resp, "row_count", len(rows)),
-            "rows": rows,
-            "totals": [
-                {met_headers[i]: tv.value for i, tv in enumerate(t.totals)}
-                for t in getattr(resp, "totals", [])
-            ] if getattr(resp, "totals", None) else None,
-            "metadata": {
-                "dimensionHeaders": dim_headers,
-                "metricHeaders": met_headers,
-            },
+            "videoId": video_id,
+            "sourceUrl": f"https://www.youtube.com/watch?v={video_id}",
+            "segments": segments,
+            "text": full_text,
         }
+    except TranscriptsDisabled:
+        return {"error": "Transcripts are disabled for this video.", "videoId": video_id}
+    except NoTranscriptFound:
+        return {"error": "No transcript found for requested languages.", "videoId": video_id, "languages": preferred_langs}
+    except TooManyRequests:
+        return {"error": "Rate limited by YouTube. Please try again later.", "videoId": video_id}
+    except VideoUnavailable:
+        return {"error": "Video unavailable.", "videoId": video_id}
     except Exception as e:
-        return {"rows": [], "error": f"Failed to run report: {e}"}
-
-
-@mcp.tool()
-async def analytics_run_realtime_report(
-    property_id: str,
-    dimensions: list[str],
-    metrics: list[str],
-    limit: int | None = 100,
-) -> dict[str, Any]:
-    """
-    Run a GA4 realtime report.
-
-    Args:
-    - property_id: Numeric ID or "properties/{id}".
-    - dimensions, metrics: Lists of field names.
-    - limit: Max rows to return (default 100).
-    """
-    try:
-        from google.analytics.data_v1beta import BetaAnalyticsDataClient
-        from google.analytics.data_v1beta.types import RunRealtimeReportRequest, Dimension, Metric
-    except Exception as e:
-        return {"rows": [], "error": f"Missing Google Analytics Data client: {e}"}
-
-    if not property_id:
-        return {"rows": [], "error": "property_id is required"}
-    if not dimensions or not metrics:
-        return {"rows": [], "error": "dimensions and metrics are required"}
-
-    name = property_id if str(property_id).startswith("properties/") else f"properties/{property_id}"
-
-    try:
-        client = BetaAnalyticsDataClient()
-        req = RunRealtimeReportRequest(
-            property=name,
-            dimensions=[Dimension(name=_format_ga_dimension_or_metric(d)) for d in dimensions],
-            metrics=[Metric(name=_format_ga_dimension_or_metric(m)) for m in metrics],
-            limit=max(1, int(limit or 100)),
-        )
-        resp = client.run_realtime_report(req)
-
-        dim_headers = [h.name for h in resp.dimension_headers]
-        met_headers = [h.name for h in resp.metric_headers]
-        rows: list[dict[str, Any]] = []
-        for r in resp.rows:
-            row: dict[str, Any] = {}
-            for i, dv in enumerate(r.dimension_values):
-                if i < len(dim_headers):
-                    row[dim_headers[i]] = dv.value
-            for j, mv in enumerate(r.metric_values):
-                if j < len(met_headers):
-                    row[met_headers[j]] = mv.value
-            rows.append(row)
-
-        return {
-            "rowCount": getattr(resp, "row_count", len(rows)),
-            "rows": rows,
-            "metadata": {
-                "dimensionHeaders": dim_headers,
-                "metricHeaders": met_headers,
-            },
-        }
-    except Exception as e:
-        return {"rows": [], "error": f"Failed to run realtime report: {e}"}
+        return {"error": f"Failed to fetch transcript: {e}", "videoId": video_id}
 
 
 app = mcp.streamable_http_app()
