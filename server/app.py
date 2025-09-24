@@ -67,19 +67,11 @@ def _openai_client() -> OpenAI:
     return OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else OpenAI()
 
 
-### YOUTUBE TRANSCRIPT ###
-
+### YOUTUBE TRANSCRIPT (yt-dlp) ###
 try:
-    from youtube_transcript_api import (
-        YouTubeTranscriptApi,
-        TranscriptsDisabled,
-        NoTranscriptFound,
-        VideoUnavailable,
-        TooManyRequests,
-    )
+    from yt_dlp import YoutubeDL  # type: ignore
 except Exception:
-    YouTubeTranscriptApi = None  # type: ignore
-    TranscriptsDisabled = NoTranscriptFound = VideoUnavailable = TooManyRequests = Exception  # type: ignore
+    YoutubeDL = None  # type: ignore
 
 
 def _extract_youtube_video_id(video: str) -> str | None:
@@ -117,120 +109,213 @@ def _extract_youtube_video_id(video: str) -> str | None:
 async def youtube_transcript(
     video: str,
     languages: list[str] | None = None,
-    translate_to: str | None = None,
 ) -> dict[str, Any]:
     """
-    Fetch the transcript for a YouTube video.
+    Fetch the transcript for a YouTube video using yt-dlp.
 
     Args:
     - video: A YouTube URL or 11-char video ID.
     - languages: Preferred languages (e.g., ["en","en-US"]). Fallbacks applied.
-    - translate_to: Optional target language code (e.g., "en").
 
     Returns: {
       "videoId",
       "url",
-      "language",
-      "translatedLanguage": optional,
+      "language",  # language code if available
       "segments": [{"text","start","duration"}...],
-      "text": joined string of transcript
-      "availableLanguages": [{"language","languageCode","isGenerated"}...]
+      "text": joined string of transcript,
+      "availableLanguages": [language codes]
     }
 
     Notes:
-    - Does not require a YouTube API key. Uses public transcript endpoints.
+    - Does not require a YouTube API key.
+    - Translation is not supported in this implementation.
     """
-    if YouTubeTranscriptApi is None:
-        return {"error": "Missing dependency: youtube-transcript-api. Ask the server admin to install it."}
+    if YoutubeDL is None:
+        return {"error": "Missing dependency: yt-dlp. Ask the server admin to install it."}
 
     video_id = _extract_youtube_video_id(video)
     if not video_id:
         return {"error": "Invalid YouTube URL or video ID."}
 
     preferred_langs = list(languages or ["en", "en-US", "en-GB"])  # copy
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # yt-dlp options to extract subtitles/captions without downloading media
+    ydl_opts = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitlesformat": "json3",  # request json3 if available
+        "subtitleslangs": preferred_langs + ["en"],
+        "quiet": True,
+        "no_warnings": True,
+        "nocheckcertificate": True,
+        "dump_single_json": True,
+    }
 
     try:
-        transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
-
-        # Build available languages list for output
-        available_languages = []
-        try:
-            for t in transcripts:  # type: ignore
-                available_languages.append(
-                    {
-                        "language": getattr(t, "language", None),
-                        "languageCode": getattr(t, "language_code", None),
-                        "isGenerated": bool(getattr(t, "is_generated", False)),
-                    }
-                )
-        except Exception:
-            pass
-
-        # Choose a transcript based on preference
-        transcript = None
-        try:
-            transcript = transcripts.find_transcript(preferred_langs)
-        except Exception:
-            # Prefer manually created if possible
-            try:
-                transcript = transcripts.find_manually_created_transcript(preferred_langs)
-            except Exception:
-                try:
-                    transcript = transcripts.find_generated_transcript(preferred_langs)
-                except Exception:
-                    # Fallback to first available
-                    try:
-                        transcript = next(iter(transcripts))  # type: ignore
-                    except Exception:
-                        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "availableLanguages": available_languages, "error": "No transcript available."}
-
-        # Optional translation
-        translated_language: str | None = None
-        try:
-            if translate_to:
-                transcript = transcript.translate(translate_to)  # type: ignore
-                translated_language = translate_to
-        except Exception:
-            # If translation fails, continue with the original transcript
-            translated_language = None
-
-        data = transcript.fetch()  # type: ignore
-        segments = [
-            {
-                "text": s.get("text"),
-                "start": s.get("start"),
-                "duration": s.get("duration"),
-            }
-            for s in (data or [])
-            if isinstance(s, dict)
-        ]
-        joined_text = " ".join([s.get("text") or "" for s in segments]).strip()
-
-        language_code = None
-        try:
-            language_code = getattr(transcript, "language_code", None)
-        except Exception:
-            pass
-
-        return {
-            "videoId": video_id,
-            "url": f"https://www.youtube.com/watch?v={video_id}",
-            "language": language_code,
-            "translatedLanguage": translated_language,
-            "segments": segments,
-            "text": joined_text,
-            "availableLanguages": available_languages,
-        }
-    except TranscriptsDisabled:
-        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": "Transcripts are disabled for this video."}
-    except NoTranscriptFound:
-        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": "No transcript found for the requested languages."}
-    except VideoUnavailable:
-        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": "Video is unavailable."}
-    except TooManyRequests:
-        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": "Rate limited by YouTube. Try again later."}
+        with YoutubeDL(ydl_opts) as ydl:  # type: ignore
+            info = ydl.extract_info(url, download=False)
     except Exception as e:
-        return {"videoId": video_id, "url": f"https://www.youtube.com/watch?v={video_id}", "segments": [], "text": "", "error": f"Failed to fetch transcript: {e}"}
+        return {"videoId": video_id, "url": url, "segments": [], "text": "", "error": f"Failed to extract info: {e}"}
+
+    # Captions are in info.get('automatic_captions') and/or info.get('subtitles') keyed by lang
+    captions = info.get("subtitles") or {}
+    auto = info.get("automatic_captions") or {}
+
+    # Build available languages list
+    available_langs_set = set(captions.keys()) | set(auto.keys())
+    available_languages = sorted(list(available_langs_set))
+
+    # Pick a language per preference order
+    chosen_lang = None
+    for lang in preferred_langs:
+        if lang in captions:
+            chosen_lang = (lang, captions[lang])
+            break
+        if lang in auto:
+            chosen_lang = (lang, auto[lang])
+            break
+    if chosen_lang is None:
+        # fallback to any
+        if captions:
+            lang = next(iter(captions.keys()))
+            chosen_lang = (lang, captions[lang])
+        elif auto:
+            lang = next(iter(auto.keys()))
+            chosen_lang = (lang, auto[lang])
+        else:
+            return {"videoId": video_id, "url": url, "segments": [], "text": "", "availableLanguages": available_languages, "error": "No captions available."}
+
+    language_code, variants = chosen_lang
+
+    # yt-dlp provides variants with different formats; prefer json3 or ttml/srt fallback
+    def _pick_variant(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not isinstance(items, list):
+            return None
+        # Prefer json3
+        for it in items:
+            if isinstance(it, dict) and (it.get("ext") == "json3" or "json3" in (it.get("format") or "")):
+                return it
+        # Then vtt
+        for it in items:
+            if isinstance(it, dict) and (it.get("ext") == "vtt"):
+                return it
+        # Then srt
+        for it in items:
+            if isinstance(it, dict) and (it.get("ext") == "srt"):
+                return it
+        # Finally any
+        return items[0] if items else None
+
+    variant = _pick_variant(variants)
+    if not variant or not isinstance(variant, dict):
+        return {"videoId": video_id, "url": url, "segments": [], "text": "", "availableLanguages": available_languages, "error": "No usable caption variant found."}
+
+    # Download caption text via HTTP
+    caption_url = variant.get("url")
+    if not caption_url:
+        return {"videoId": video_id, "url": url, "segments": [], "text": "", "availableLanguages": available_languages, "error": "Caption URL missing."}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(caption_url)
+            resp.raise_for_status()
+            caption_body = resp.text or ""
+    except httpx.HTTPStatusError as e:
+        return {"videoId": video_id, "url": url, "segments": [], "text": "", "availableLanguages": available_languages, "error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
+    except Exception as e:
+        return {"videoId": video_id, "url": url, "segments": [], "text": "", "availableLanguages": available_languages, "error": f"Failed to download captions: {e}"}
+
+    # Parse json3 (if ext=json3) else do a best-effort parse for VTT/SRT
+    segments: list[dict[str, Any]] = []
+    try:
+        if variant.get("ext") == "json3":
+            import json
+            data = json.loads(caption_body)
+            # json3 has events with segments
+            for ev in data.get("events", []) or []:
+                if not isinstance(ev, dict):
+                    continue
+                if not ev.get("segs"):
+                    continue
+                # tStartMs and dDurationMs are in ms
+                start = (ev.get("tStartMs") or 0) / 1000.0
+                duration = (ev.get("dDurationMs") or 0) / 1000.0
+                text_parts = []
+                for seg in ev.get("segs", []) or []:
+                    if isinstance(seg, dict) and seg.get("utf8"):
+                        text_parts.append(seg.get("utf8"))
+                text = ("".join(text_parts or [])).strip()
+                if text:
+                    segments.append({"text": text, "start": start, "duration": duration})
+        else:
+            # Minimal VTT/SRT parser to extract time and text blocks
+            block_texts: list[str] = []
+            current_lines: list[str] = []
+            for line in caption_body.splitlines():
+                if line.strip() == "":
+                    if current_lines:
+                        block_texts.append("\n".join(current_lines))
+                        current_lines = []
+                else:
+                    current_lines.append(line.rstrip("\n"))
+            if current_lines:
+                block_texts.append("\n".join(current_lines))
+
+            def _parse_time(ts: str) -> float:
+                # Formats: HH:MM:SS.mmm or MM:SS.mmm
+                ts = ts.strip()
+                parts = ts.split(":")
+                parts = [p for p in parts if p != ""]
+                if len(parts) == 3:
+                    h, m, s = parts
+                elif len(parts) == 2:
+                    h, m, s = "0", parts[0], parts[1]
+                else:
+                    return 0.0
+                if "," in s:
+                    s = s.replace(",", ".")
+                return int(h) * 3600 + int(m) * 60 + float(s)
+
+            for block in block_texts:
+                lines = [l for l in block.splitlines() if l.strip()]
+                if not lines:
+                    continue
+                # VTT may have a cue id in first line; time in second; SRT often has index line then time line
+                time_idx = 0
+                if "-->" not in lines[0] and len(lines) > 1 and "-->" in lines[1]:
+                    time_idx = 1
+                if "-->" not in lines[time_idx]:
+                    # not a cue block
+                    continue
+                times = lines[time_idx]
+                text_lines = lines[time_idx + 1 :]
+                try:
+                    start_str = times.split("-->")[0].strip()
+                    end_str = times.split("-->")[1].strip().split(" ")[0]
+                    start = _parse_time(start_str)
+                    end = _parse_time(end_str)
+                    duration = max(0.0, end - start)
+                except Exception:
+                    start = 0.0
+                    duration = 0.0
+                text = " ".join([t.strip() for t in text_lines if t.strip()])
+                if text:
+                    segments.append({"text": text, "start": start, "duration": duration})
+    except Exception as e:
+        return {"videoId": video_id, "url": url, "segments": [], "text": "", "availableLanguages": available_languages, "error": f"Failed to parse captions: {e}"}
+
+    joined_text = " ".join([s.get("text") or "" for s in segments]).strip()
+
+    return {
+        "videoId": video_id,
+        "url": url,
+        "language": language_code,
+        "segments": segments,
+        "text": joined_text,
+        "availableLanguages": available_languages,
+    }
 
 @mcp.tool()
 async def search(query: str) -> dict[str, Any]:

@@ -4,7 +4,7 @@ This directory contains a production‑ready scaffold for building an authentica
 
 It mirrors the TypeScript version in `authenticated-mcp-server-scaffold`, but uses the official Python MCP SDK.
 
-- Implements the required MCP tools: **`search`** and **`fetch`**; plus **`fact_check_search`** using Google's Fact Check Tools API, **`rss_fetch`** for RSS feeds, and **`youtube_transcript`** for YouTube captions.
+- Implements the required MCP tools: **`search`** and **`fetch`**; plus **`fact_check_search`** using Google's Fact Check Tools API, **`rss_fetch`** for RSS feeds, and **`youtube_transcript`** for YouTube captions (via yt-dlp).
 - Secures access using **OAuth 2.1** with an **Auth0** authorization server.
 - Runs locally with FastAPI and the Python MCP SDK’s HTTP streaming transport.
 
@@ -126,7 +126,7 @@ npx @modelcontextprotocol/inspector@latest
 - `fetch(id: string)` → returns the full text for a given file ID using the OpenAI Vector Store Files API.
 - `fact_check_search(query: string, language_code?: string = "en", page_size?: number = 10, page_token?: string)` → searches Google Fact Check Tools for claims and returns `{ text, claimant, claimDate, reviews: [{ publisher, url, title, reviewDate, textualRating, languageCode }] }` and an optional `nextPageToken`.
  - `rss_fetch(limit?: number = 10)` → returns recent items from the BBC Technology RSS feed: `https://feeds.bbci.co.uk/news/technology/rss.xml`.
- - `youtube_transcript(video: string, languages?: string[], translate_to?: string)` → fetches captions for a YouTube video by URL or ID. Returns `{ videoId, url, language, translatedLanguage?, segments: [{ text, start, duration }...], text, availableLanguages }`. Does not require a YouTube API key.
+ - `youtube_transcript(video: string, languages?: string[])` → fetches captions for a YouTube video by URL or ID using yt-dlp. Returns `{ videoId, url, language, segments: [{ text, start, duration }...], text, availableLanguages }`. No translation; does not require a YouTube API key.
 
 Both tools require a valid access token. The server enforces token verification with Auth0’s JWKS and checks the `user` permission (scope) if present.
 
