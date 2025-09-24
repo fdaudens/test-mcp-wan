@@ -437,31 +437,47 @@ async def guardian_search(
 
 app = mcp.streamable_http_app()
 
-# Add a simple health check endpoint for Render
+# Add health and test streaming directly to the MCP app to preserve its lifespan
 try:
     import asyncio
-    from fastapi import FastAPI
-    from starlette.responses import StreamingResponse
+    from starlette.responses import StreamingResponse, JSONResponse
 
-    _outer_app = FastAPI()
+    if hasattr(app, "include_router"):
+        # FastAPI path
+        from fastapi import APIRouter
 
-    @_outer_app.get("/healthz")
-    async def _healthz() -> dict[str, bool]:
-        return {"ok": True}
+        router = APIRouter()
 
-    async def _event_generator():
-        while True:
-            yield "event: ping\ndata: ok\n\n"
-            await asyncio.sleep(1)
+        @router.get("/healthz")
+        async def _healthz() -> dict[str, bool]:
+            return {"ok": True}
 
-    @_outer_app.get("/test-sse")
-    async def _test_sse() -> StreamingResponse:
-        return StreamingResponse(_event_generator(), media_type="text/event-stream")
+        async def _event_generator():
+            while True:
+                yield "event: ping\ndata: ok\n\n"
+                await asyncio.sleep(1)
 
-    _outer_app.mount("/", app)
-    app = _outer_app
+        @router.get("/test-sse")
+        async def _test_sse() -> StreamingResponse:
+            return StreamingResponse(_event_generator(), media_type="text/event-stream")
+
+        app.include_router(router)
+    else:
+        # Starlette path
+        async def _healthz(request):
+            return JSONResponse({"ok": True})
+
+        async def _event_generator():
+            while True:
+                yield "event: ping\ndata: ok\n\n"
+                await asyncio.sleep(1)
+
+        async def _test_sse(request):
+            return StreamingResponse(_event_generator(), media_type="text/event-stream")
+
+        app.add_route("/healthz", _healthz)
+        app.add_route("/test-sse", _test_sse)
 except Exception:
-    # If FastAPI is unavailable for any reason, continue without health route
     pass
 
 if __name__ == "__main__":
