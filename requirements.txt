@@ -7,3 +7,6 @@ PyJWT[crypto]>=2.8.0
 httpx>=0.27.0
 python-dotenv>=1.0.1
 feedparser>=6.0.11
+# Google Analytics Admin and Data API clients
+google-analytics-admin>=0.24.0
+google-analytics-data>=0.18.8

@@ -17,6 +17,7 @@ Your server:
 - Exposes a `search` tool that queries an OpenAI Vector Store and returns results.
 - Exposes a `fetch` tool that returns full document content by ID.
 - Exposes a `fact_check_search` tool that queries Google Fact Check Tools for claim reviews.
+- Exposes Google Analytics tools: account summaries, property details, Google Ads links, custom dimensions/metrics, and core/realtime reports.
 - Requires a valid access token issued by your Auth0 tenant before executing tools.
 
 ---
@@ -80,6 +81,11 @@ Optional keys (for additional tools):
 # Google Fact Check Tools API (for `fact_check_search`)
 GOOGLE_FACT_CHECK_API_KEY=your_google_api_key
 
+# Google Analytics (ADC or service account)
+# If using a service account or downloaded OAuth client credentials, point to the JSON file path:
+# GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/credentials.json
+# Optional, specify project id
+# GOOGLE_PROJECT_ID=your-gcp-project-id
 ```
 
 ---
@@ -115,6 +121,12 @@ npx @modelcontextprotocol/inspector@latest
 - List Tools → should show `search`, `fetch`, `fact_check_search`, and `rss_fetch`.
 - Call `search` with a test query, then `fetch` using a returned `id`.
  - Call `fact_check_search` with a query like: `"vaccine microchips"` (requires `GOOGLE_FACT_CHECK_API_KEY`).
+ - Call `analytics_get_account_summaries` to list GA accounts and properties.
+ - Call `analytics_get_property_details` with `property_id`.
+ - Call `analytics_list_google_ads_links` with `property_id`.
+ - Call `analytics_get_custom_dimensions_and_metrics` with `property_id`.
+ - Call `analytics_run_report` with `property_id`, `dimensions`, `metrics`, `start_date`, `end_date`.
+ - Call `analytics_run_realtime_report` with `property_id`, `dimensions`, `metrics`.
 
 ---
 
@@ -129,17 +141,35 @@ Both tools require a valid access token. The server enforces token verification 
 
 ---
 
-## 8. Code tour
+## 8. Google Analytics setup
+
+This server uses Application Default Credentials (ADC) to authenticate with Google APIs. Choose one of the following:
+
+- gcloud user credentials:
+  - Enable the APIs in your Google Cloud project: Google Analytics Admin API and Google Analytics Data API.
+  - Run:
+    ```bash
+    gcloud auth application-default login \
+      --scopes https://www.googleapis.com/auth/analytics.readonly,https://www.googleapis.com/auth/cloud-platform
+    ```
+  - Optionally set `GOOGLE_PROJECT_ID` in your environment.
+
+- Service account credentials:
+  - Create a service account and download a JSON key.
+  - Grant the service account access to your GA4 property (read only).
+  - Set `GOOGLE_APPLICATION_CREDENTIALS` to the JSON file path.
+
+References: [google-analytics-mcp README](https://github.com/googleanalytics/google-analytics-mcp)
+
+## 9. Code tour
 
 - `server/app.py`
   - Configures the MCP server via `FastMCP`.
-  - Declares `search`, `fetch`, and `fact_check_search` tools and routes tool calls.
-
-- `server/tools/fact_check.py`: Tool module.
+  - Declares `search`, `fetch`, `fact_check_search`, `rss_fetch`, and Google Analytics tools.
 
 ---
 
-## 9. Production notes
+## 10. Production notes
 
 - Host behind HTTPS and set `RESOURCE_SERVER_URL` to your public URL.  
 - Consider caching JWKS and adding retry/backoff logic.  
@@ -147,13 +177,13 @@ Both tools require a valid access token. The server enforces token verification 
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 - `401 Unauthorized`: Ensure the client is sending `Authorization: Bearer <token>` and that `iss` and `aud` match your Auth0 tenant and API Identifier.
 - Empty `search` results: Verify `VECTOR_STORE_ID` and that your vector store contains files (see `python-rss-data-pipeline`).
 
 ---
 
-## 11. License
+## 12. License
 
 MIT
