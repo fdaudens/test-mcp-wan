@@ -509,12 +509,39 @@ async def youtube_transcript(
 
     preferred_langs = languages or []
     try:
-        # Use a thread to avoid blocking the event loop
-        transcript = await asyncio.to_thread(
-            YouTubeTranscriptApi.get_transcript,
-            video_id,
-            preferred_langs if preferred_langs else None,
-        )
+        # Try new/old API: prefer get_transcript if available, else list_transcripts
+        transcript: list[dict[str, Any]]
+        get_transcript_fn = getattr(YouTubeTranscriptApi, "get_transcript", None)
+        if callable(get_transcript_fn):
+            # Use a thread to avoid blocking the event loop
+            if preferred_langs:
+                transcript = await asyncio.to_thread(get_transcript_fn, video_id, preferred_langs)
+            else:
+                transcript = await asyncio.to_thread(get_transcript_fn, video_id)
+        else:
+            list_transcripts_fn = getattr(YouTubeTranscriptApi, "list_transcripts", None)
+            if not callable(list_transcripts_fn):
+                raise AttributeError("youtube-transcript-api: no get_transcript or list_transcripts API available")
+
+            downloader = await asyncio.to_thread(list_transcripts_fn, video_id)
+            transcript_obj = None
+            if preferred_langs:
+                try:
+                    transcript_obj = downloader.find_transcript(preferred_langs)
+                except Exception:
+                    try:
+                        transcript_obj = downloader.find_generated_transcript(preferred_langs)
+                    except Exception:
+                        transcript_obj = None
+            # Fallback: pick the first available transcript
+            if transcript_obj is None:
+                try:
+                    transcript_obj = next(iter(downloader))
+                except Exception:
+                    transcript_obj = None
+            if transcript_obj is None:
+                raise NoTranscriptFound("No transcript found for requested languages.")
+            transcript = await asyncio.to_thread(transcript_obj.fetch)
         # transcript is a list of {"text","start","duration"}
         segments: list[dict[str, Any]] = []
         parts: list[str] = []
