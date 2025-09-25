@@ -126,7 +126,7 @@ npx @modelcontextprotocol/inspector@latest
 - `fetch(id: string)` → returns the full text for a given file ID using the OpenAI Vector Store Files API.
 - `fact_check_search(query: string, language_code?: string = "en", page_size?: number = 10, page_token?: string)` → searches Google Fact Check Tools for claims and returns `{ text, claimant, claimDate, reviews: [{ publisher, url, title, reviewDate, textualRating, languageCode }] }` and an optional `nextPageToken`.
  - `rss_fetch(limit?: number = 10)` → returns recent items from the BBC Technology RSS feed: `https://feeds.bbci.co.uk/news/technology/rss.xml`.
- - `youtube_transcript(video: string, languages?: string[])` → fetches captions for a YouTube video by URL or ID using yt-dlp. Returns `{ videoId, url, language, segments: [{ text, start, duration }...], text, availableLanguages }`. No translation; does not require a YouTube API key.
+ - `youtube_transcript(video: string, languages?: string[], cookies_file?: string, cookies_from_browser?: string)` → fetches captions for a YouTube video by URL or ID using yt-dlp. Supports cookies via a cookies.txt file or `cookies_from_browser` spec like `"chrome"`, `"chrome:Default"`, `"firefox:default-release"`, `"brave+keyring:Default"`, or `"firefox:default::container_name"`. Returns `{ videoId, url, language, segments: [{ text, start, duration }...], text, availableLanguages }`. No translation; does not require a YouTube API key.
 
 Both tools require a valid access token. The server enforces token verification with Auth0’s JWKS and checks the `user` permission (scope) if present.
 

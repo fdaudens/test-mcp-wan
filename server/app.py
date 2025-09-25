@@ -109,6 +109,8 @@ def _extract_youtube_video_id(video: str) -> str | None:
 async def youtube_transcript(
     video: str,
     languages: list[str] | None = None,
+    cookies_file: str | None = None,
+    cookies_from_browser: str | None = None,
 ) -> dict[str, Any]:
     """
     Fetch the transcript for a YouTube video using yt-dlp.
@@ -116,6 +118,10 @@ async def youtube_transcript(
     Args:
     - video: A YouTube URL or 11-char video ID.
     - languages: Preferred languages (e.g., ["en","en-US"]). Fallbacks applied.
+    - cookies_file: Optional path to a Netscape cookies.txt file.
+    - cookies_from_browser: Optional browser spec similar to yt-dlp CLI
+      (e.g., "chrome", "chrome:Default", "firefox:default-release",
+      "brave+keyring:Default", "firefox:default::container_name").
 
     Returns: {
       "videoId",
@@ -152,6 +158,42 @@ async def youtube_transcript(
         "nocheckcertificate": True,
         "dump_single_json": True,
     }
+
+    # Apply cookies options if provided
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+
+    def _parse_browser_cookies_spec(spec: str) -> tuple[str, str | None, str | None, str | None]:
+        # Format: BROWSER[+KEYRING][:PROFILE][::CONTAINER]
+        # Examples: "chrome", "chrome:Default", "firefox:default-release",
+        #           "brave+keyring:Default", "firefox:default::container_name"
+        container: str | None = None
+        profile: str | None = None
+        keyring: str | None = None
+
+        left = spec
+        if "::" in spec:
+            parts = spec.split("::", 1)
+            left, container = parts[0], parts[1] or None
+
+        browser_plus = left
+        if ":" in left:
+            bp, prof = left.split(":", 1)
+            browser_plus = bp
+            profile = prof or None
+
+        browser = browser_plus
+        if "+" in browser_plus:
+            b, kr = browser_plus.split("+", 1)
+            browser = b
+            keyring = kr or None
+
+        return browser, profile, keyring, container
+
+    if cookies_from_browser:
+        browser, profile, keyring, container = _parse_browser_cookies_spec(cookies_from_browser)
+        # yt-dlp expects a tuple (browser, profile, keyring, container)
+        ydl_opts["cookiesfrombrowser"] = (browser, profile, keyring, container)
 
     try:
         with YoutubeDL(ydl_opts) as ydl:  # type: ignore
